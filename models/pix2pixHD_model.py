@@ -5,17 +5,18 @@ from torch.autograd import Variable
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
+from .patchnce import PatchNCELoss
 
 
 class Pix2PixHDModel(BaseModel):
     def name(self):
         return 'Pix2PixHDModel'
 
-    def init_loss_filter(self, use_gan_feat_loss, use_vgg_loss, use_l1_loss):
-        flags = (True, use_gan_feat_loss, use_vgg_loss, use_l1_loss, True, True)
+    def init_loss_filter(self, use_gan_feat_loss, use_vgg_loss, use_l1_loss, use_nce_loss):
+        flags = (True, use_gan_feat_loss, use_vgg_loss, use_l1_loss, True, True, use_nce_loss, use_nce_loss)
 
-        def loss_filter(g_gan, g_gan_feat, g_vgg, g_l1, d_real, d_fake):
-            return [l for (l, f) in zip((g_gan, g_gan_feat, g_vgg, g_l1, d_real, d_fake), flags) if f]
+        def loss_filter(g_gan, g_gan_feat, g_vgg, g_l1, d_real, d_fake, nce, nce_y):
+            return [l for (l, f) in zip((g_gan, g_gan_feat, g_vgg, g_l1, d_real, d_fake, nce, nce_y), flags) if f]
 
         return loss_filter
 
@@ -27,6 +28,7 @@ class Pix2PixHDModel(BaseModel):
         self.use_features = opt.instance_feat or opt.label_feat
         self.gen_features = self.use_features and not self.opt.load_features
         input_nc = opt.label_nc if opt.label_nc != 0 else opt.input_nc
+        self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
 
         ##### define networks
         # Generator network
@@ -35,9 +37,7 @@ class Pix2PixHDModel(BaseModel):
             netG_input_nc += 1
         if self.use_features:
             netG_input_nc += opt.feat_num
-        self.netG = networks.define_G(netG_input_nc, opt.output_nc, opt.ngf, opt.netG,
-                                      opt.n_downsample_global, opt.n_blocks_global, opt.n_local_enhancers,
-                                      opt.n_blocks_local, opt.norm, gpu_ids=self.gpu_ids)
+        self.netG = networks.define_G(netG_input_nc, opt.output_nc, opt.ngf, opt.netG, opt.n_downsample_global, opt.n_blocks_global, opt.n_local_enhancers, opt.n_blocks_local, opt.norm, gpu_ids=self.gpu_ids)
 
         # Discriminator network
         if self.isTrain:
@@ -52,6 +52,9 @@ class Pix2PixHDModel(BaseModel):
         if self.gen_features:
             self.netE = networks.define_G(opt.output_nc, opt.feat_num, opt.nef, 'encoder',
                                           opt.n_downsample_E, norm=opt.norm, gpu_ids=self.gpu_ids)
+        if self.opt.use_nce:
+            self.netF = networks.define_F(opt.input_nc, opt.netF, opt.normG, opt.use_dropout, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
+
         if self.opt.verbose:
             print('---------- Networks initialized -------------')
 
@@ -61,6 +64,7 @@ class Pix2PixHDModel(BaseModel):
             self.load_network(self.netG, 'G', opt.which_epoch, pretrained_path)
             if self.isTrain:
                 self.load_network(self.netD, 'D', opt.which_epoch, pretrained_path)
+                self.load_network(self.netF, 'F', opt.which_epoch, pretrained_path)
             if self.gen_features:
                 self.load_network(self.netE, 'E', opt.which_epoch, pretrained_path)
 
@@ -72,15 +76,20 @@ class Pix2PixHDModel(BaseModel):
             self.old_lr = opt.lr
 
             # define loss functions
-            self.loss_filter = self.init_loss_filter(not opt.no_ganFeat_loss, not opt.no_vgg_loss, not opt.no_L1_loss)
+            self.loss_filter = self.init_loss_filter(not opt.no_ganFeat_loss, not opt.no_vgg_loss, not opt.no_L1_loss, opt.use_nce)
 
             self.criterionGAN = networks.GANLoss(use_lsgan=not opt.no_lsgan, tensor=self.Tensor)
             self.criterionFeat = torch.nn.L1Loss()
             if not opt.no_vgg_loss:
                 self.criterionVGG = networks.VGGLoss(self.gpu_ids)
 
+            if opt.use_nce:
+                self.criterionNCE = []
+                for _ in self.nce_layers:
+                    self.criterionNCE.append(PatchNCELoss(opt).to(self.gpu_ids[0]))
+
             # Names so we can breakout loss
-            self.loss_names = self.loss_filter('G_GAN', 'G_GAN_Feat', 'G_VGG', 'G_L1', 'D_real', 'D_fake')
+            self.loss_names = self.loss_filter('G_GAN', 'G_GAN_Feat', 'G_VGG', 'G_L1', 'D_real', 'D_fake', 'NCE', 'NCE_Y')
 
             # initialize optimizers
             # optimizer G
@@ -191,13 +200,24 @@ class Pix2PixHDModel(BaseModel):
         if not self.opt.no_vgg_loss:
             loss_G_VGG = self.criterionVGG(fake_image, real_image) * self.opt.lambda_feat
 
-            # L1 loss
+        # L1 loss
         loss_G_L1 = 0
         if not self.opt.no_L1_loss:
             loss_G_L1 = self.criterionFeat(fake_image, real_image) * self.opt.lambda_L1
+        # idt_b = self.netG(real_image)
+        if self.opt.use_nce and self.opt.lambda_NCE > 0.0:
+            loss_NCE = self.calculate_NCE_loss(real_image, fake_image)
+        else:
+            loss_NCE = torch.tensor(0.0)
 
+        # if self.opt.use_nce and self.opt.nce_idt and self.opt.lambda_NCE > 0.0:
+        #     loss_NCE_Y = self.calculate_NCE_loss(real_image, idt_b)
+        #     # loss_NCE_both = (self.loss_NCE + self.loss_NCE_Y) * 0.5
+        # else:
+        loss_NCE_Y = torch.tensor(0.0)
+            # loss_NCE_both = self.loss_NCE
         # Only return the fake_B image if necessary to save BW
-        return [self.loss_filter(loss_G_GAN, loss_G_GAN_Feat, loss_G_VGG, loss_G_L1, loss_D_real, loss_D_fake), None if not infer else fake_image]
+        return [self.loss_filter(loss_G_GAN, loss_G_GAN_Feat, loss_G_VGG, loss_G_L1, loss_D_real, loss_D_fake, loss_NCE, loss_NCE_Y), None if not infer else fake_image]
 
     def inference(self, label, inst, image=None):
         # Encode Inputs
@@ -303,10 +323,26 @@ class Pix2PixHDModel(BaseModel):
             print('update learning rate: %f -> %f' % (self.old_lr, lr))
         self.old_lr = lr
 
+    def calculate_NCE_loss(self, src, tgt):
+        n_layers = len(self.nce_layers)
+        feat_q = self.netG.get_downsample_features(src)
+        feat_k = self.netG.get_downsample_features(tgt)
+
+        if self.opt.flip_equivariance and self.flipped_for_equivariance:
+            feat_q = [torch.flip(fq, [3]) for fq in feat_q]
+
+        feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
+        feat_q_pool, _ = self.netF(feat_q, self.opt.num_patches, sample_ids)
+
+        total_nce_loss = 0.0
+        for f_q, f_k, crit in zip(feat_q_pool, feat_k_pool, self.criterionNCE):
+            loss = crit(f_q, f_k) * self.opt.lambda_NCE
+            total_nce_loss += loss.mean()
+
+        return total_nce_loss / n_layers
+
 
 class InferenceModel(Pix2PixHDModel):
     def forward(self, inp):
         label, inst = inp
         return self.inference(label, inst)
-
-

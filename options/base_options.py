@@ -11,7 +11,7 @@ class BaseOptions():
 
     def initialize(self):
         # experiment specifics
-        self.parser.add_argument('--name', type=str, default='FFPE2HE', help='name of the experiment. It decides where to store samples and models')
+        self.parser.add_argument('--name', type=str, default='', help='name of the experiment. It decides where to store samples and models')
         self.parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         self.parser.add_argument('--checkpoints_dir', type=str, default='./checkpoints', help='models are saved here')
         self.parser.add_argument('--model', type=str, default='pix2pixHD', help='which model to use')
@@ -62,6 +62,28 @@ class BaseOptions():
         self.parser.add_argument('--nef', type=int, default=16, help='# of encoder filters in the first conv layer')
         self.parser.add_argument('--n_clusters', type=int, default=10, help='number of clusters for features')
 
+        # for nce loss
+        self.parser.add_argument('--use_nce', action='store_true', help='if specified, use nce loss')
+        self.parser.add_argument('--CUT_mode', type=str, default="CUT", choices='(CUT, cut, FastCUT, fastcut)')
+        self.parser.add_argument('--normG', type=str, default='none', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for G')
+        self.parser.add_argument('--normD', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for D')
+        self.parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss：GAN(G(X))')
+        self.parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
+        self.parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=True, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
+        self.parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
+        self.parser.add_argument('--nce_includes_all_negatives_from_minibatch',
+                            type=util.str2bool, nargs='?', const=True, default=False,
+                            help='(used for single image translation) If True, include the negatives from the other samples of the minibatch when computing the contrastive loss. Please see models/patchnce.py for more details.')
+        self.parser.add_argument('--netF', type=str, default='mlp_sample', choices=['sample', 'reshape', 'mlp_sample'], help='how to downsample the feature map')
+        self.parser.add_argument('--netF_nc', type=int, default=256)
+        self.parser.add_argument('--nce_T', type=float, default=0.07, help='temperature for NCE loss')
+        self.parser.add_argument('--num_patches', type=int, default=256, help='number of patches per layer')
+        self.parser.add_argument('--flip_equivariance',
+                            type=util.str2bool, nargs='?', const=True, default=False,
+                            help="Enforce flip-equivariance as additional regularization. It's used by FastCUT, but not CUT")
+        self.parser.add_argument('--init_type', type=str, default='xavier', choices=['normal', 'xavier', 'kaiming', 'orthogonal'], help='network initialization')
+        self.parser.add_argument('--init_gain', type=float, default=0.02, help='scaling factor for normal, xavier and orthogonal.')
+        self.parser.add_argument('--no_antialias', action='store_true', help='if specified, use stride=2 convs instead of antialiased-downsampling (sad)')
         self.initialized = True
 
     def parse(self, save=True):
