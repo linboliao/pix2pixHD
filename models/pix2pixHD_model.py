@@ -64,6 +64,7 @@ class Pix2PixHDModel(BaseModel):
             self.load_network(self.netG, 'G', opt.which_epoch, pretrained_path)
             if self.isTrain:
                 self.load_network(self.netD, 'D', opt.which_epoch, pretrained_path)
+            if self.opt.use_nce:
                 self.load_network(self.netF, 'F', opt.which_epoch, pretrained_path)
             if self.gen_features:
                 self.load_network(self.netE, 'E', opt.which_epoch, pretrained_path)
@@ -302,6 +303,8 @@ class Pix2PixHDModel(BaseModel):
         self.save_network(self.netD, 'D', which_epoch, self.gpu_ids)
         if self.gen_features:
             self.save_network(self.netE, 'E', which_epoch, self.gpu_ids)
+        if self.opt.use_nce:
+            self.save_network(self.netF, 'F', which_epoch, self.gpu_ids)
 
     def update_fixed_params(self):
         # after fixing the global generator for a number of iterations, also start finetuning it
