@@ -100,6 +100,11 @@ for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         else:
             loss_D.backward()
         optimizer_D.step()
+        if opt.use_nce:
+            if i == 0 and epoch == start_epoch:
+                optimizer_F = torch.optim.Adam(model.module.netF.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+            optimizer_F.zero_grad()
+            optimizer_F.step()
 
         ############## Display results and errors ##########
         ### print out errors
